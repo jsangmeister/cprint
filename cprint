@@ -1,0 +1,145 @@
+#!/bin/bash
+
+# constants
+MAX_LINES=66
+MIN_LEFTOVER=$(echo "import math; print(int(math.ceil(${MAX_LINES} * 0.45)))" | python)
+EMPTY_LINES=12
+
+print_usage() {
+    echo "cprint - code printing tool"
+    echo ""
+    echo "Dependencies: a2ps, python. Also Ghostscript if you want to save as PDF."
+    echo ""
+    echo "Usage: cprint [-h header] [-o outfile] [-p printer] file(s)"
+    echo ""
+    echo "    -h, -header"
+    echo "        Give a header that will be printed at the start of the file. Use"
+    echo "        '<hline>' to draw a horizontal line."
+    echo "    -p, -printer"
+    echo "        Give a printer to print the document on. This will override any given"
+    echo "        '-o' option."
+    echo "        NOTE: No default printer is selected! You have to specify this if you"
+    echo "        want to print."
+    echo "    -o, -output"
+    echo "        Don't print it, but instead output it to the specified location. Default"
+    echo "        is 'file.pdf' in the current working dir. (Ghostscript required)"
+}
+
+underline="________________________________________________________________________________"
+
+pagebreak=$(mktemp)
+emptyLines=$(mktemp)
+tmpFiles="$pagebreak $emptyLines"
+
+trap "rm -f $pagebreak" 20
+trap "rm -f $emptyLines" 20
+
+printf '\f' > $pagebreak
+for i in `seq 3 $EMPTY_LINES`; do   # from 3 because underline
+    echo '' >> $emptyLines
+done
+printf "$underline\n\n" >> $emptyLines
+
+printer=""
+output=""
+
+files=""
+lines_all=0
+while [ "${1:0:1}" = "-" ]; do
+    if [ "$1" = '-header' -o "$1" = "-h" ]; then
+        header=$(mktemp)
+        trap "rm -f $header" 20
+        printf "${2//<hline>/$underline}\n" > $header
+
+        files="$header"
+        lines_all=$(fold -s $header | wc -l | awk '{print($1)}')
+    elif [ "$1" = "-printer" -o "$1" = "-p" ]; then
+        printer="-P$2"
+    elif [ "$1" = "-o" -o "$1" = "-output" ]; then
+        output="$2"
+    elif [ "$1" = "-help" ]; then
+        print_usage
+        exit 0
+    fi
+    shift 2
+done
+
+if [ "$printer" = "" -a "$output" = "" ]; then
+    output="file.pdf"
+fi
+
+# give at least one file
+if [ $# -eq 0 ]
+then
+    echo "No file given"
+    rm -f $tmpFiles;
+    exit 1
+fi
+
+for i in $(seq $#)
+do
+    if [ ! -r "$1" ]; then
+        echo "Error: File \"$1\" could not be read"
+        rm -f $tmpFiles
+        exit 1
+    fi
+
+    lines=$(fold -s $1 | wc -l | awk '{print($1)}')
+    lines_all=$((lines_all + lines))
+
+    filename=$(mktemp)
+    trap "rm -f $filename" 20
+    tmpFiles="${tmpFiles} $filename"
+    printf "$1\n$underline\n\n" > $filename
+
+    lines=$(fold -s $filename | wc -l | awk '{print($1)}')
+    lines_all=$((lines_all + lines))
+    leftover=$((MAX_LINES - lines_all % (MAX_LINES)))
+
+    files="${files} $filename $1"
+
+    shift
+
+    if [ $# -ne 0 -a $leftover -ne $MAX_LINES ]     # prevent linebreak on empty side
+    then
+        if [ $leftover -gt $MIN_LEFTOVER ]; then
+            files="${files} $emptyLines"
+            lines_all=$((lines_all + EMPTY_LINES))
+        else
+            files="${files} $pagebreak"
+            lines_all=$((lines_all + leftover))
+        fi
+    fi
+done
+
+pages=$(echo "import math; print(int(math.ceil(${lines_all}/66.0/2.0)))" | python)
+
+echo "$pages pages will be printed. Continue? (y/n)"
+
+read line;
+line=$(echo $line | tr '[[:upper:]]' '[[:lower:]]')
+if [ ! "$line" = "yes" -a ! "$line" = "ja" -a ! "$line" = "j" -a ! "$line" = "y" ]; then
+    if [ ! "$line" = "nein" -a ! "$line" = "no" -a ! "$line" = "n" ]; then
+        echo "Error: expected yes/no"
+    fi
+    rm -f $tmpFiles
+    exit 1
+fi
+
+theFile=$(mktemp)
+trap "rm -f $theFile" 20
+
+# version-control for no backup
+# iconv because a2ps is not utf8 compatible...
+cat $files | iconv -f utf8 -t ISO-8859-1 | a2ps --version-control=none -q --tabsize=2 -o "$theFile" -M A4 --no-header --right-footer='#?l!%s./%s#!#?v|%s./%s#|%E|!' 
+
+# print or output pdf
+if [ ! "$printer" = "" ]; then
+    lpr $printer $theFile
+else
+    ps2pdf "$theFile" $output
+fi
+
+rm -f ${tmpFiles}
+rm -f $theFile
+exit 0
